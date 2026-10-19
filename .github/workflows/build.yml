@@ -1,0 +1,86 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Kadr.xcodeproj \
+            -scheme Kadr \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package the .ipa
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name "Kadr.app" | head -n 1)
+          test -d "$APP"
+          rm -rf Payload Kadr.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Kadr.ipa Payload
+          ls -lh Kadr.ipa
+
+      - name: Upload the .ipa as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kadr-ipa
+          path: Kadr.ipa
+
+      - name: Publish the .ipa as the latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Kadr (latest build)
+          body: "Unsigned .ipa. Install it with Sideloadly or AltStore (they sign it with your Apple ID)."
+          files: Kadr.ipa
+          make_latest: true
+
+      - name: Save error log to the ci-logs branch
+        if: failure()
+        run: |
+          {
+            echo "Run: ${GITHUB_RUN_ID}  Commit: ${GITHUB_SHA}"
+            echo "----- errors -----"
+            grep -E "error:|fatal error|BUILD FAILED|\*\* BUILD" build.log | sort -u | head -n 120 || true
+            echo "----- tail of build.log -----"
+            tail -n 60 build.log || true
+          } > /tmp/errors.txt
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git checkout --orphan ci-logs
+          git rm -rf . > /dev/null 2>&1 || true
+          cp /tmp/errors.txt errors.txt
+          git add errors.txt
+          git commit -m "build errors for ${GITHUB_SHA}" > /dev/null
+          git push --force origin ci-logs
