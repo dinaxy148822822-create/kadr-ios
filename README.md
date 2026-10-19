@@ -1,1 +1,0 @@
-# kadr-ios
